@@ -150,7 +150,7 @@ if (params.protocol == 'amplicon' && !params.skip_variants && !params.amplicon_b
 }
 if (params.amplicon_bed) { ch_amplicon_bed = file(params.amplicon_bed, checkIfExists: true) }
 
-callerList = [ 'varscan2', 'ivar', 'bcftools']
+callerList = [ 'varscan2', 'ivar', 'bcftools', 'freebayes']
 callers = params.callers ? params.callers.split(',').collect{ it.trim().toLowerCase() } : []
 if ((callerList + callers).unique().size() != callerList.size()) {
     exit 1, "Invalid variant calller option: ${params.callers}. Valid options: ${callerList.join(', ')}"
@@ -407,7 +407,7 @@ if (params.gff) {
 /*
  * PREPROCESSING: Uncompress Kraken2 database
  */
-if (!params.skip_kraken2 && params.kraken2_db && !params.skip_assembly) {
+if (!params.skip_kraken2 && params.kraken2_db) {
     file(params.kraken2_db, checkIfExists: true)
     if (params.kraken2_db.endsWith('.tar.gz')) {
         process UNTAR_KRAKEN2_DB {
@@ -740,9 +740,9 @@ if (!params.skip_adapter_trimming) {
         tuple val(sample), val(single_end), path(reads) from ch_cat_fastp
 
         output:
-        tuple val(sample), val(single_end), path("*.trim.fastq.gz") into ch_fastp_bowtie2,
-                                                                         ch_fastp_cutadapt,
-                                                                         ch_fastp_kraken2
+        tuple val(sample), val(single_end), path("*.trim.fastq.gz") into ch_fastp_cutadapt,
+                                                                         ch_fastp_kraken2,
+                                                                         ch_fastp_kraken2amp
         path "*.json" into ch_fastp_mqc
         path "*_fastqc.{zip,html}" into ch_fastp_fastqc_mqc
         path "*.{log,fastp.html}"
@@ -786,11 +786,68 @@ if (!params.skip_adapter_trimming) {
     ch_cat_fastp
         .into { ch_fastp_bowtie2
                 ch_fastp_cutadapt
-                ch_fastp_kraken2 }
+                ch_fastp_kraken2
+                ch_fastp_kraken2amp}
     ch_fastp_mqc = Channel.empty()
     ch_fastp_fastqc_mqc = Channel.empty()
 }
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+/* --                                                                     -- */
+/* --                        Kraken2 for amplicon                         -- */
+/* --                                                                     -- */
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
+/*
+ * STEP 4.1: Filter reads with Kraken2 for amplicon
+ */
+if (!params.skip_kraken2 ) {
+    process KRAKEN2AMP {
+        tag "$db"
+        label 'process_high'
+        publishDir "${params.outdir}/preprocess/kraken2", mode: params.publish_dir_mode,
+            saveAs: { filename ->
+                          if (filename.endsWith(".txt")) filename
+                          else params.save_kraken2_fastq ? filename : null
+                    }
+
+        input:
+        tuple val(sample), val(single_end), path(reads) from ch_fastp_kraken2amp
+        path db from ch_kraken2_db
+
+        output:
+        tuple val(sample), val(single_end), path("*.viral*") into ch_fastp_bowtie2
+        path "*.report.txt" into ch_kraken2amp_report_mqc
+        path "*.host*"
+
+
+        script:
+        pe = single_end ? "" : "--paired"
+        classified = single_end ? "${sample}.host.fastq" : "${sample}.host#.fastq"
+        unclassified = single_end ? "${sample}.viral.fastq" : "${sample}.viral#.fastq"
+        """
+        kraken2 \\
+            --db $db \\
+            --threads $task.cpus \\
+            --unclassified-out $unclassified \\
+            --classified-out $classified \\
+            --report ${sample}.kraken2.report.txt \\
+            --report-zero-counts \\
+            $pe \\
+            --gzip-compressed \\
+            $reads
+        pigz -p $task.cpus *.fastq
+        """
+    }
+} else {
+    ch_fastp_kraken2
+        .into { ch_kraken2_spades
+                ch_kraken2_metaspades
+                ch_kraken2_unicycler
+                ch_kraken2_minia }
+    ch_kraken2amp_report_mqc = Channel.empty()
+}
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 /* --                                                                     -- */
@@ -850,6 +907,7 @@ process MAKE_SNPEFF_DB {
     tuple path("SnpEffDB"), path("*.config") into ch_snpeff_db_varscan2,
                                                   ch_snpeff_db_ivar,
                                                   ch_snpeff_db_bcftools,
+                                                  ch_snpeff_db_freebayes,
                                                   ch_snpeff_db_spades,
                                                   ch_snpeff_db_metaspades,
                                                   ch_snpeff_db_unicycler,
@@ -1040,7 +1098,9 @@ if (params.skip_markduplicates) {
                 ch_markdup_bam_mpileup
                 ch_markdup_bam_varscan2_consensus
                 ch_markdup_bam_bcftools
-                ch_markdup_bam_bcftools_consensus }
+                ch_markdup_bam_bcftools_consensus
+                ch_markdup_bam_freebayes
+                ch_markdup_bam_freebayes_consensus }
     ch_markdup_bam_flagstat_mqc = Channel.empty()
     ch_markdup_bam_metrics_mqc = Channel.empty()
 } else {
@@ -1070,7 +1130,9 @@ if (params.skip_markduplicates) {
                                                                                 ch_markdup_bam_mpileup,
                                                                                 ch_markdup_bam_varscan2_consensus,
                                                                                 ch_markdup_bam_bcftools,
-                                                                                ch_markdup_bam_bcftools_consensus
+                                                                                ch_markdup_bam_bcftools_consensus,
+                                                                                ch_markdup_bam_freebayes,
+                                                                                ch_markdup_bam_freebayes_consensus
         path "*.{flagstat,idxstats,stats}" into ch_markdup_bam_flagstat_mqc
         path "*.txt" into ch_markdup_bam_metrics_mqc
 
@@ -1287,6 +1349,7 @@ process SAMTOOLS_MPILEUP {
     """
     samtools mpileup \\
         --count-orphans \\
+        --ignore-overlaps \\
         --no-BAQ \\
         --max-depth $params.mpileup_depth \\
         --fasta-ref $fasta \\
@@ -1384,18 +1447,20 @@ process VARSCAN2_CONSENSUS {
     script:
     prefix = "${sample}.AF${params.max_allele_freq}"
     """
-    cat $fasta | bcftools consensus ${vcf[0]} > ${prefix}.consensus.fa
 
     bedtools genomecov \\
         -bga \\
         -ibam ${bam[0]} \\
         -g $fasta \\
-        | awk '\$4 < $params.min_coverage' | bedtools merge > ${prefix}.mask.bed
-
+        | awk '\$4 < $params.min_coverage' > ${prefix}.lowcov.bed
+    parse_mask_bed.py ${vcf[0]} ${prefix}.lowcov.bed ${prefix}.lowcov.fix.bed
+    bedtools merge -i ${prefix}.lowcov.fix.bed > ${prefix}.mask.bed
+	
     bedtools maskfasta \\
-        -fi ${prefix}.consensus.fa \\
+        -fi $fasta \\
         -bed ${prefix}.mask.bed \\
-        -fo ${prefix}.consensus.masked.fa
+        -fo ${index_base}.ref.masked.fa
+    cat ${index_base}.ref.masked.fa | bcftools consensus ${vcf[0]} > ${prefix}.consensus.masked.fa
     header=\$(head -n 1 ${prefix}.consensus.masked.fa | sed 's/>//g')
     sed -i "s/\${header}/${sample}/g" ${prefix}.consensus.masked.fa
 
@@ -1540,8 +1605,8 @@ process IVAR_VARIANTS {
     output:
     tuple val(sample), val(single_end), path("${prefix}.vcf.gz*") into ch_ivar_highfreq_snpeff,
                                                                        ch_ivar_highfreq_intersect
-    tuple val(sample), val(single_end), path("${sample}.vcf.gz*") into ch_ivar_lowfreq_snpeff
     path "${prefix}.bcftools_stats.txt" into ch_ivar_bcftools_highfreq_mqc
+    tuple val(sample), val(single_end), path("${sample}.vcf.gz*") into ch_ivar_lowfreq_snpeff
     path "${sample}.variant.counts_mqc.tsv" into ch_ivar_count_mqc
     path "${sample}.bcftools_stats.txt"
     path "${sample}.tsv"
@@ -1782,18 +1847,22 @@ process BCFTOOLS_CONSENSUS {
 
     script:
     """
-    cat $fasta | bcftools consensus ${vcf[0]} > ${sample}.consensus.fa
 
     bedtools genomecov \\
         -bga \\
         -ibam ${bam[0]} \\
         -g $fasta \\
-        | awk '\$4 < $params.min_coverage' | bedtools merge > ${sample}.mask.bed
+        | awk '\$4 < $params.min_coverage' > ${sample}.lowcov.bed
+
+    parse_mask_bed.py ${vcf[0]} ${sample}.lowcov.bed ${sample}.lowcov.fix.bed
+
+    bedtools merge -i ${sample}.lowcov.fix.bed > ${sample}.mask.bed
 
     bedtools maskfasta \\
-        -fi ${sample}.consensus.fa \\
+        -fi $fasta \\
         -bed ${sample}.mask.bed \\
-        -fo ${sample}.consensus.masked.fa
+        -fo ${index_base}.ref.masked.fa
+    cat ${index_base}.ref.masked.fa | bcftools consensus ${vcf[0]} > ${sample}.consensus.masked.fa
     sed -i 's/${index_base}/${sample}/g' ${sample}.consensus.masked.fa
     header=\$(head -n1 ${sample}.consensus.masked.fa | sed 's/>//g')
     sed -i "s/\${header}/${sample}/g" ${sample}.consensus.masked.fa
@@ -1885,6 +1954,193 @@ process BCFTOOLS_QUAST {
 }
 
 ////////////////////////////////////////////////////
+/* --              FREEBAYES                   -- */
+////////////////////////////////////////////////////
+
+
+/*
+ * STEP 5.7.4: Variant calling with FreeBayes
+ */
+process FREEBAYES_VARIANTS {
+    tag "$sample"
+    label 'process_medium'
+    publishDir "${params.outdir}/variants/freebayes", mode: params.publish_dir_mode,
+        saveAs: { filename ->
+                      if (filename.endsWith(".txt")) "bcftools_stats/$filename"
+                      else filename
+                }
+
+    when:
+    !params.skip_variants && 'freebayes' in callers
+
+    input:
+    tuple val(sample), val(single_end), path(bam) from ch_markdup_bam_freebayes
+    path fasta from ch_fasta
+
+    output:
+    tuple val(sample), val(single_end), path("${prefix}.vcf.gz*") into ch_freebayes_variants_consensus,
+                                                                       ch_freebayes_variants_snpeff,
+                                                                       ch_freebayes_variants_intersect
+    path "*.bcftools_stats.txt" into ch_freebayes_variants_mqc
+    tuple val(sample), val(single_end), path("${sample}.vcf.gz*") into ch_freebayes_lowfreq_snpeff
+
+    script:
+    prefix = "${sample}.AF${params.max_allele_freq}"
+    """
+    #freebayes-parallel <(fasta_generate_regions.py ${fasta}.fai 100000) $task.cpus \\
+    freebayes \\
+        --min-mapping-quality $params.min_base_qual \\
+        --min-alternate-count $params.min_coverage \\
+        --min-alternate-fraction $params.min_allele_freq \\
+        -f $fasta \\
+        ${bam[0]} \\
+        | vcfallelicprimitives -k -g \\
+        | bgzip -c > ${sample}.vcf.gz
+    tabix -p vcf -f ${sample}.vcf.gz
+    bcftools stats ${sample}.vcf.gz > ${sample}.bcftools_stats.txt
+
+    bcftools filter \\
+        -i 'INFO/AO /(INFO/AO + INFO/RO) >= $params.max_allele_freq' \\
+        --output-type z \\
+        --output ${prefix}.vcf.gz \\
+        ${sample}.vcf.gz
+    tabix -p vcf -f ${prefix}.vcf.gz
+    bcftools stats ${prefix}.vcf.gz > ${prefix}.bcftools_stats.txt
+    """
+}
+
+/*
+ * STEP 5.7.4.1: Genome consensus generation with BCFTools and masked with BEDTools
+ */
+process FREEBAYES_CONSENSUS {
+    tag "$sample"
+    label 'process_medium'
+    publishDir "${params.outdir}/variants/freebayes/consensus", mode: params.publish_dir_mode,
+        saveAs: { filename ->
+                      if (filename.endsWith(".tsv")) "base_qc/$filename"
+                      else if (filename.endsWith(".pdf")) "base_qc/$filename"
+                      else filename
+                }
+
+    when:
+    !params.skip_variants && 'freebayes' in callers
+
+    input:
+    tuple val(sample), val(single_end), path(bam), path(vcf) from ch_markdup_bam_freebayes_consensus.join(ch_freebayes_variants_consensus, by: [0,1])
+    path fasta from ch_fasta
+
+    output:
+    tuple val(sample), val(single_end), path("*consensus.masked.fa") into ch_freebayes_consensus_masked
+    path "*.{consensus.fa,tsv,pdf}"
+
+    script:
+    """
+    bedtools genomecov \\
+        -bga \\
+        -ibam ${bam[0]} \\
+        -g $fasta \\
+        | awk '\$4 < $params.min_coverage' > ${sample}.lowcov.bed
+
+    parse_mask_bed.py ${vcf[0]} ${sample}.lowcov.bed ${sample}.lowcov.fix.bed
+
+    bedtools merge -i ${sample}.lowcov.fix.bed > ${sample}.mask.bed
+
+    bedtools maskfasta \\
+        -fi $fasta \\
+        -bed ${sample}.mask.bed \\
+        -fo ${index_base}.ref.masked.fa
+    cat ${index_base}.ref.masked.fa | bcftools consensus ${vcf[0]} > ${sample}.consensus.masked.fa
+    sed -i 's/${index_base}/${sample}/g' ${sample}.consensus.masked.fa
+    header=\$(head -n1 ${sample}.consensus.masked.fa | sed 's/>//g')
+    sed -i "s/\${header}/${sample}/g" ${sample}.consensus.masked.fa
+
+    plot_base_density.r --fasta_files ${sample}.consensus.masked.fa --prefixes $sample --output_dir ./
+    """
+}
+
+
+/*
+ * STEP 5.7.4.2: FreeBayes variant calling annotation with SnpEff and SnpSift
+ */
+process FREEBAYES_SNPEFF {
+    tag "$sample"
+    label 'process_medium'
+    publishDir "${params.outdir}/variants/freebayes/snpeff", mode: params.publish_dir_mode
+
+    when:
+    !params.skip_variants && 'freebayes' in callers && params.gff && !params.skip_snpeff
+
+    input:
+    tuple val(sample), val(single_end), path(vcf) from ch_freebayes_variants_snpeff
+    tuple file(db), file(config) from ch_snpeff_db_freebayes
+
+    output:
+    path "*.snpEff.csv" into ch_freebayes_snpeff_mqc
+    path "*.vcf.gz*"
+    path "*.{txt,html}"
+
+    script:
+    """
+    snpEff ${index_base} \\
+        -config $config \\
+        -dataDir $db \\
+        ${vcf[0]} \\
+        -csvStats ${sample}.snpEff.csv \\
+        | bgzip -c > ${sample}.snpEff.vcf.gz
+    tabix -p vcf -f ${sample}.snpEff.vcf.gz
+    mv snpEff_summary.html ${sample}.snpEff.summary.html
+
+    SnpSift extractFields -s "," \\
+        -e "." \\
+        ${sample}.snpEff.vcf.gz \\
+        CHROM POS REF ALT \\
+        "ANN[*].GENE" "ANN[*].GENEID" \\
+        "ANN[*].IMPACT" "ANN[*].EFFECT" \\
+        "ANN[*].FEATURE" "ANN[*].FEATUREID" \\
+        "ANN[*].BIOTYPE" "ANN[*].RANK" "ANN[*].HGVS_C" \\
+        "ANN[*].HGVS_P" "ANN[*].CDNA_POS" "ANN[*].CDNA_LEN" \\
+        "ANN[*].CDS_POS" "ANN[*].CDS_LEN" "ANN[*].AA_POS" \\
+        "ANN[*].AA_LEN" "ANN[*].DISTANCE" "EFF[*].EFFECT" \\
+        "EFF[*].FUNCLASS" "EFF[*].CODON" "EFF[*].AA" "EFF[*].AA_LEN" \\
+        > ${sample}.snpSift.table.txt
+      """
+}
+
+/*
+ * STEP 5.7.4.3: Freebayes consensus sequence report with QUAST
+ */
+process FREEBAYES_QUAST {
+    label 'process_medium'
+    publishDir "${params.outdir}/variants/freebayes", mode: params.publish_dir_mode,
+        saveAs: { filename ->
+                      if (!filename.endsWith(".tsv")) filename
+                }
+
+    when:
+    !params.skip_variants && 'freebayes' in callers && !params.skip_variants_quast
+
+    input:
+    path consensus from ch_freebayes_consensus_masked.collect{ it[2] }
+    path fasta from ch_fasta
+    path gff from ch_gff
+
+    output:
+    path "quast"
+    path "report.tsv" into ch_freebayes_quast_mqc
+    script:
+    features = params.gff ? "--features $gff" : ""
+    """
+    quast.py \\
+        --output-dir quast \\
+        -r $fasta \\
+        $features \\
+        --threads $task.cpus \\
+        ${consensus.join(' ')}
+    ln -s quast/report.tsv
+    """
+}
+
+////////////////////////////////////////////////////
 /* --            INTERSECT VARIANTS            -- */
 ////////////////////////////////////////////////////
 
@@ -1896,6 +2152,7 @@ if (!params.skip_variants && callers.size() > 2) {
     ch_varscan2_highfreq_intersect
         .join(ch_ivar_highfreq_intersect, by: [0,1])
         .join(ch_bcftools_variants_intersect, by: [0,1])
+        .join(ch_freebayes_variants_intersect, by: [0,1])
         .set { ch_varscan2_highfreq_intersect }
 
     process BCFTOOLS_ISEC {
@@ -1905,7 +2162,7 @@ if (!params.skip_variants && callers.size() > 2) {
         publishDir "${params.outdir}/variants/intersect", mode: params.publish_dir_mode
 
         input:
-        tuple val(sample), val(single_end), path('varscan2/*'), path('ivar/*'), path('bcftools/*') from ch_varscan2_highfreq_intersect
+        tuple val(sample), val(single_end), path('varscan2/*'), path('ivar/*'), path('bcftools/*'), path('freebayes/*') from ch_varscan2_highfreq_intersect
 
         output:
         path "$sample"
@@ -1914,7 +2171,7 @@ if (!params.skip_variants && callers.size() > 2) {
         """
         bcftools isec  \\
             --nfiles +2 \\
-            --output-type z \\
+            --output-type z -c indels \\
             -p $sample \\
             */*.vcf.gz
         """
@@ -3276,6 +3533,7 @@ process get_software_versions {
     ivar -v > v_ivar.txt
     echo \$(varscan 2>&1) > v_varscan.txt
     bcftools -v > v_bcftools.txt
+    freebayes --version > v_freebayes.txt
     snpEff -version > v_snpeff.txt
     echo \$(SnpSift 2>&1) > v_snpsift.txt
     quast.py --version > v_quast.txt
@@ -3336,9 +3594,13 @@ process MULTIQC {
     path ('bcftools/variants/bcftools/*') from ch_bcftools_variants_mqc.collect().ifEmpty([])
     path ('bcftools/variants/snpeff/*') from ch_bcftools_snpeff_mqc.collect().ifEmpty([])
     path ('bcftools/consensus/quast/*') from ch_bcftools_quast_mqc.collect().ifEmpty([])
+    path ('freebayes/variants/bcftools/*') from ch_freebayes_variants_mqc.collect().ifEmpty([])
+    path ('freebayes/variants/snpeff/*') from ch_freebayes_snpeff_mqc.collect().ifEmpty([])
+    path ('freebayes/consensus/quast/*') from ch_freebayes_quast_mqc.collect().ifEmpty([])
     path ('cutadapt/log/*') from ch_cutadapt_mqc.collect().ifEmpty([])
     path ('cutadapt/fastqc/*') from ch_cutadapt_fastqc_mqc.collect().ifEmpty([])
-    path ('kraken2/*') from ch_kraken2_report_mqc.collect().ifEmpty([])
+    path ('kraken2amp/*') from ch_kraken2amp_report_mqc.collect().ifEmpty([])
+	path ('kraken2/*') from ch_kraken2_report_mqc.collect().ifEmpty([])
     path ('spades/bcftools/*') from ch_spades_vg_bcftools_mqc.collect().ifEmpty([])
     path ('spades/snpeff/*') from ch_spades_snpeff_mqc.collect().ifEmpty([])
     path ('spades/quast/*') from ch_quast_spades_mqc.collect().ifEmpty([])

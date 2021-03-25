@@ -20,6 +20,7 @@ run_modules:
     - quast
     - cutadapt
     - kraken
+    - freebayes
 
 exclude_modules:
     - 'general_stats'
@@ -148,6 +149,27 @@ module_order:
         info: 'This section of the report shows QUAST results for consensus sequence generated from BCFTools variants.'
         path_filters:
             - './bcftools/consensus/quast/*.tsv'
+    - freebayes:
+        name: 'Variant calling with freebayes'
+        info: 'This section of the report shows results for variants called by FreeBayes.'
+    - bcftools:
+        name: 'VARIANTS: BCFTools (FreeBayes)'
+        anchor: 'bcftools_freebayes'
+        info: 'This section of the report shows BCFTools stats results for high frequency variants called by FreeBayes. The allele frequency filtering threshold can be set by the --max_allele_freq parameter (Default: 0.8).'
+        path_filters:
+            - './freebayes/variants/bcftools/*.txt'
+    - snpeff:
+        name: 'VARIANTS: SnpEff (FreeBayes)'
+        anchor: 'snpeff_freebayes'
+        info: 'This section of the report shows SnpEff results for high frequency variants called by FreeBayes. The allele frequency filtering threshold can be set by the --max_allele_freq parameter (Default: 0.8).'
+        path_filters:
+            - './freebayes/variants/snpeff/*.csv'
+    - quast:
+        name: 'VARIANTS: QUAST (FreeBayes)'
+        anchor: 'quast_freebayes'
+        info: 'This section of the report shows QUAST results for consensus sequences generated from high frequency variants with FreeBayes. The allele frequency filtering threshold can be set by the --max_allele_freq parameter (Default: 0.8).'
+        path_filters:
+            - './freebayes/consensus/quast/*.tsv'
     - cutadapt:
         name: 'ASSEMBLY: Cutadapt (primer trimming)'
         info: 'This section of the report shows Cutadapt results for reads after primer sequence trimming.'
