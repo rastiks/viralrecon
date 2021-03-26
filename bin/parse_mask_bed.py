@@ -90,10 +90,20 @@ def parse_mask_bed(BedIn,BedOut,indels_pos_len,snp):
 						pass
 				if len(output) > 0:
 					for element in output:
-						snp_analysis.append(element)
+						init_poso=element.split('\t')[1]
+						end_poso=element.split('\t')[2]
+						if int(init_poso) == int(end_poso):
+							pass
+						else:
+							snp_analysis.append(element)
 				else:
 					if printings == 1:
-						snp_analysis.append(oline)
+						init_poso=oline.split('\t')[1]
+						end_poso=oline.split('\t')[2]
+						if int(init_poso) == int(end_poso):
+							pass
+						else:
+							snp_analysis.append(oline)
 			else: ### no snp's need to be checked
 				printing = 1
 				if len(indels_postions) > 0:
