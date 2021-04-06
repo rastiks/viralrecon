@@ -1997,7 +1997,7 @@ process FREEBAYES_VARIANTS {
         | vcfallelicprimitives -k -g \\
         | bgzip -c > ${sample}.vcf.gz
     tabix -p vcf -f ${sample}.vcf.gz
-    bcftools stats ${sample}.vcf.gz > ${sample}.bcftools_stats.txt
+    bcftools stats --af-tag AF ${sample}.vcf.gz > ${sample}.bcftools_stats.txt
 
     bcftools filter \\
         -i 'INFO/AO /(INFO/AO + INFO/RO) >= $params.max_allele_freq' \\
@@ -2005,7 +2005,7 @@ process FREEBAYES_VARIANTS {
         --output ${prefix}.vcf.gz \\
         ${sample}.vcf.gz
     tabix -p vcf -f ${prefix}.vcf.gz
-    bcftools stats ${prefix}.vcf.gz > ${prefix}.bcftools_stats.txt
+    bcftools stats --af-tag AF ${prefix}.vcf.gz > ${prefix}.bcftools_stats.txt
     """
 }
 
