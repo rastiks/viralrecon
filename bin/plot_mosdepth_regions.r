@@ -106,7 +106,7 @@ for (sample in unique(dat$sample)) {
                 ggtitle(paste(sample,'median coverage per amplicon'))
 
           outfile <- paste(OUTDIR,sample,".",OUTSUFFIX,".coverage.pdf", sep='')
-          ggsave(file=outfile, plot, height=3+(0.3*length(unique(sample_dat$region))), width=16, units="cm")
+          ggsave(file=outfile, plot, height=3+(0.3*length(unique(sample_dat$region))), width=16, units="cm", limitsize = FALSE)
     } else {
         plot <- ggplot(sample_dat,aes(x=end,y=coverage)) +
                 geom_ribbon(aes(ymin=0, ymax=coverage), fill="#D55E00", data=) +
@@ -122,7 +122,7 @@ for (sample in unique(dat$sample)) {
                 ggtitle(paste(sample,'coverage'))
 
         outfile <- paste(OUTDIR,sample,".",OUTSUFFIX,".coverage.pdf", sep='')
-        ggsave(file=outfile, plot, height=6, width=12, units="in")
+        ggsave(file=outfile, plot, height=6, width=12, units="in", limitsize = FALSE)
     }
 }
 
